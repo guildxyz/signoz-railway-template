@@ -37,6 +37,55 @@ receivers:
       # never leaves the project's internal network. Public TLS would
       # require sslmode=require + a CA cert.
       insecure: true
+  # Per-query aggregates from pg_stat_statements. Top 50 by mean_exec_time
+  # caps cardinality per scrape (queryid is otherwise unbounded over time).
+  # Requires:
+  #   CREATE EXTENSION pg_stat_statements;   (run once per DB)
+  #   plus pg_monitor on the user (already granted via signoz_monitor).
+  sqlquery:
+    driver: postgres
+    datasource: "host=${env:POSTGRES_HOST} port=${env:POSTGRES_PORT} user=${env:POSTGRES_USER} password=${env:POSTGRES_PASSWORD} dbname=${env:POSTGRES_DB} sslmode=disable"
+    collection_interval: 60s
+    queries:
+      - sql: |
+          SELECT
+            queryid::text AS query_id,
+            LEFT(regexp_replace(query, '\s+', ' ', 'g'), 200) AS query_text,
+            calls,
+            total_exec_time,
+            mean_exec_time,
+            rows
+          FROM pg_stat_statements
+          WHERE calls > 10
+          ORDER BY mean_exec_time DESC
+          LIMIT 50
+        metrics:
+          - metric_name: postgresql.query.calls
+            value_column: calls
+            attribute_columns: [query_id, query_text]
+            value_type: int
+            data_type: sum
+            monotonic: true
+            aggregation: cumulative
+          - metric_name: postgresql.query.total_exec_time_ms
+            value_column: total_exec_time
+            attribute_columns: [query_id, query_text]
+            value_type: double
+            data_type: sum
+            monotonic: true
+            aggregation: cumulative
+          - metric_name: postgresql.query.mean_exec_time_ms
+            value_column: mean_exec_time
+            attribute_columns: [query_id, query_text]
+            value_type: double
+            data_type: gauge
+          - metric_name: postgresql.query.rows
+            value_column: rows
+            attribute_columns: [query_id, query_text]
+            value_type: int
+            data_type: sum
+            monotonic: true
+            aggregation: cumulative
 processors:
   batch:
     send_batch_size: 10000
@@ -109,6 +158,10 @@ service:
       exporters: [signozclickhousemetrics]
     metrics/postgres:
       receivers: [postgresql]
+      processors: [resourcedetection, batch]
+      exporters: [signozclickhousemetrics]
+    metrics/postgres-queries:
+      receivers: [sqlquery]
       processors: [resourcedetection, batch]
       exporters: [signozclickhousemetrics]
     logs:
